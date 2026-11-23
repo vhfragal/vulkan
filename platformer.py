@@ -5,30 +5,12 @@ class PlatformTile:
     def __init__(self, x, y, w, h, kind="solid"):
         self.rect = pygame.Rect(x, y, w, h)
         self.kind = kind
-        self.surface = pygame.Surface((w, h))
-        self._paint()
-
-    def _paint(self):
-        w, h = self.rect.size
-        if self.kind == "solid":
-            self.surface.fill((58, 68, 92))
-            pygame.draw.rect(self.surface, (95, 195, 130), (0, 0, w, 6))
-            pygame.draw.rect(self.surface, (38, 44, 62), (0, 0, w, h), 2)
-        elif self.kind == "hazard":
-            self.surface.fill((30, 32, 46))
-            spike_w = 16
-            for sx in range(0, w, spike_w):
-                pts = [(sx, h), (sx + spike_w // 2, 4), (sx + spike_w, h)]
-                pygame.draw.polygon(self.surface, (235, 75, 95), pts)
 
 
 class Coin:
     def __init__(self, x, y):
         self.rect = pygame.Rect(x, y, 18, 18)
         self.collected = False
-        self.surface = pygame.Surface((18, 18), pygame.SRCALPHA)
-        pygame.draw.circle(self.surface, (255, 210, 60), (9, 9), 8)
-        pygame.draw.circle(self.surface, (255, 248, 180), (6, 6), 3)
 
 
 class Player:
@@ -39,15 +21,6 @@ class Player:
         self.vel = pygame.Vector2(0.0, 0.0)
         self.on_ground = False
         self.facing = 1
-
-        self.surface = pygame.Surface((28, 38), pygame.SRCALPHA)
-        self._paint()
-
-    def _paint(self):
-        self.surface.fill((0, 0, 0, 0))
-        pygame.draw.rect(self.surface, (70, 175, 255), (2, 8, 24, 28), border_radius=5)
-        pygame.draw.rect(self.surface, (230, 248, 255), (12, 13, 12, 7), border_radius=2)
-        pygame.draw.rect(self.surface, (255, 95, 110), (2, 22, 24, 5))
 
     def respawn(self):
         self.pos.update(self.spawn)
@@ -112,20 +85,24 @@ class Player:
 
 
 class PlatformerWorld:
+    """Builds a Pygame sprite atlas once and submits instanced quads to WgpuSpriteBatchRenderer."""
+
+    # Atlas sub-rectangles (x, y, w, h) inside the 1024x256 texture atlas
+    UV_WHITE = (0, 0, 8, 8)
+    UV_SOLID = (16, 0, 64, 64)
+    UV_HAZARD = (96, 0, 16, 24)
+    UV_COIN = (128, 0, 18, 18)
+    UV_PLAYER = (160, 0, 28, 38)
+    UV_HUD = (0, 80, 900, 32)
+
     def __init__(self, width, height):
         self.width = width
         self.height = height
-        #self.canvas = pygame.Surface((width, height))
-        # Native 32-bit RGBA layout matching Vulkan/WGPU rgba8unorm_srgb with zero channel swizzling
-        self.canvas = pygame.Surface(
-            (width, height),
-            flags=pygame.SRCALPHA,
-            depth=32,
-            masks=(0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000),
-        )
         self.font = pygame.font.SysFont("monospace", 20, bold=True)
+        self.hud_surface = pygame.Surface((self.UV_HUD[2], self.UV_HUD[3]), pygame.SRCALPHA)
         self.score = 0
         self.cam_x = 0.0
+        self._last_hud_key = None
 
         self.player = Player(80, 380)
         self.tiles = [
@@ -150,37 +127,88 @@ class PlatformerWorld:
             Coin(1580, 225),
         ]
 
+    @classmethod
+    def build_atlas_surface(cls):
+        """Paints all game sprites into a single Pygame Surface atlas."""
+        atlas = pygame.Surface((1024, 256), pygame.SRCALPHA)
+        atlas.fill((0, 0, 0, 0))
+
+        # 1. White pixel block (for tinted grid lines & borders)
+        pygame.draw.rect(atlas, (255, 255, 255, 255), cls.UV_WHITE)
+
+        # 2. Solid platform tile (64x64)
+        sx, sy, sw, sh = cls.UV_SOLID
+        pygame.draw.rect(atlas, (58, 68, 92, 255), (sx, sy, sw, sh))
+        pygame.draw.rect(atlas, (95, 195, 130, 255), (sx, sy, sw, 6))
+        pygame.draw.rect(atlas, (38, 44, 62, 255), (sx, sy, sw, sh), 2)
+
+        # 3. Single spike hazard tile (16x24, repeated horizontally by GPU)
+        hx, hy, hw, hh = cls.UV_HAZARD
+        pts = [(hx, hy + hh), (hx + hw // 2, hy + 4), (hx + hw, hy + hh)]
+        pygame.draw.polygon(atlas, (235, 75, 95, 255), pts)
+
+        # 4. Coin (18x18)
+        cx, cy, _, _ = cls.UV_COIN
+        pygame.draw.circle(atlas, (255, 210, 60, 255), (cx + 9, cy + 9), 8)
+        pygame.draw.circle(atlas, (255, 248, 180, 255), (cx + 6, cy + 6), 3)
+
+        # 5. Player (28x38)
+        px, py, _, _ = cls.UV_PLAYER
+        pygame.draw.rect(atlas, (70, 175, 255, 255), (px + 2, py + 8, 24, 28), border_radius=5)
+        pygame.draw.rect(atlas, (230, 248, 255, 255), (px + 12, py + 13, 12, 7), border_radius=2)
+        pygame.draw.rect(atlas, (255, 95, 110, 255), (px + 2, py + 22, 24, 5))
+
+        return atlas
+
     def update(self, dt, keys):
         self.score += self.player.update(dt, keys, self.tiles, self.coins)
         target_cam = max(0.0, self.player.rect.centerx - self.width * 0.4)
         self.cam_x += (target_cam - self.cam_x) * min(1.0, dt * 8.0)
 
-
-    def render(self, fps=0.0):
-        self.canvas.fill((22, 26, 38))
+    def render_gpu(self, renderer, fps=0.0):
+        renderer.begin_batch()
         ox = int(self.cam_x)
 
+        # Background grid lines (tinted white texel)
+        grid_color = (30 / 255.0, 36 / 255.0, 52 / 255.0, 1.0)
         for gx in range(-(ox // 2) % 80, self.width, 80):
-            pygame.draw.line(self.canvas, (30, 36, 52), (gx, 0), (gx, self.height), 1)
+            renderer.draw_sprite((gx, 0, 1, self.height), self.UV_WHITE, color=grid_color)
 
+        # Tiles & repeating spike quads
         for tile in self.tiles:
-            self.canvas.blit(tile.surface, (tile.rect.x - ox, tile.rect.y))
+            sx = tile.rect.x - ox
+            if sx + tile.rect.w < 0 or sx > self.width:
+                continue
+            if tile.kind == "solid":
+                renderer.draw_sprite((sx, tile.rect.y, tile.rect.w, tile.rect.h), self.UV_SOLID)
+            elif tile.kind == "hazard":
+                for sub_x in range(0, tile.rect.w, 16):
+                    renderer.draw_sprite((sx + sub_x, tile.rect.y, 16, tile.rect.h), self.UV_HAZARD)
 
+        # Coins
         for coin in self.coins:
             if not coin.collected:
-                self.canvas.blit(coin.surface, (coin.rect.x - ox, coin.rect.y))
+                renderer.draw_sprite((coin.rect.x - ox, coin.rect.y, 18, 18), self.UV_COIN)
 
-        sprite = (
-            self.player.surface
-            if self.player.facing == 1
-            else pygame.transform.flip(self.player.surface, True, False)
+        # Player (UV flipped horizontally on GPU when facing left)
+        renderer.draw_sprite(
+            (self.player.rect.x - ox, self.player.rect.y, 28, 38),
+            self.UV_PLAYER,
+            flip_x=(self.player.facing == -1),
         )
-        self.canvas.blit(sprite, (self.player.rect.x - ox, self.player.rect.y))
 
-        hud = self.font.render(
-            f"FPS: {fps:5.1f} | COINS: {self.score}/{len(self.coins)}   R: Reset",
-            True,
-            (235, 240, 250),
-        )
-        self.canvas.blit(hud, (16, 16))
-        return self.canvas
+        # Re-upload HUD strip only when FPS integer or score changes
+        hud_key = (int(fps), self.score)
+        if hud_key != self._last_hud_key:
+            self._last_hud_key = hud_key
+            self.hud_surface.fill((0, 0, 0, 0))
+            txt = self.font.render(
+                f"FPS: {fps:5.1f} | COINS: {self.score}/{len(self.coins)}   [A/D: Move | Space: Jump | R: Reset]",
+                True,
+                (235, 240, 250),
+            )
+            self.hud_surface.blit(txt, (0, 0))
+            renderer.upload_atlas_region(self.hud_surface, self.UV_HUD[0], self.UV_HUD[1])
+
+        renderer.draw_sprite((16, 16, self.UV_HUD[2], self.UV_HUD[3]), self.UV_HUD)
+        renderer.end_batch_and_present()

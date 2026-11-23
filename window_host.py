@@ -101,7 +101,7 @@ class PygameWindowHost:
                  height=RENDER_SIZE[1], 
                  title="Pygame-CE + WGPU (Vulkan) 2D Platformer", 
                  fullscreen=True,
-                 display_index=1  # 0 = Primary monitor, 1 = Second monitor
+                 display_index=2  # 0 = Primary monitor, 1 = Second monitor
                  ):
         #On Windows 10/11 with 125% or 150% display scaling enabled, prevents Windows from stretching a blurred window.
         #ctypes.windll.user32.SetProcessDPIAware()
