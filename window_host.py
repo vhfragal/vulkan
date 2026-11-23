@@ -69,16 +69,54 @@ def _load_pygame_sdl2():
     return ctypes.CDLL(default_lib)
 
 
+class _SDL_Rect(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("w", ctypes.c_int),
+        ("h", ctypes.c_int),
+    ]
+
+
+def _get_display_bounds(display_index):
+    """Returns exact OS desktop coordinates (x, y, w, h) for any monitor index."""
+    sdl2 = _load_pygame_sdl2()
+    sdl2.SDL_GetNumVideoDisplays.restype = ctypes.c_int
+    sdl2.SDL_GetDisplayBounds.argtypes = [ctypes.c_int, ctypes.POINTER(_SDL_Rect)]
+    sdl2.SDL_GetDisplayBounds.restype = ctypes.c_int
+
+    num_displays = sdl2.SDL_GetNumVideoDisplays()
+    target_idx = max(0, min(display_index, num_displays - 1))
+
+    rect = _SDL_Rect()
+    if sdl2.SDL_GetDisplayBounds(target_idx, ctypes.byref(rect)) != 0:
+        raise RuntimeError(f"SDL_GetDisplayBounds failed for display {target_idx}")
+
+    return rect.x, rect.y, rect.w, rect.h
 
 
 class PygameWindowHost:
-    def __init__(self, width=RENDER_SIZE[0], height=RENDER_SIZE[1], 
-                 title="Pygame-CE + WGPU (Vulkan) 2D Platformer", fullscreen=True):
+    def __init__(self, 
+                 width=RENDER_SIZE[0], 
+                 height=RENDER_SIZE[1], 
+                 title="Pygame-CE + WGPU (Vulkan) 2D Platformer", 
+                 fullscreen=True,
+                 display_index=1  # 0 = Primary monitor, 1 = Second monitor
+                 ):
         #On Windows 10/11 with 125% or 150% display scaling enabled, prevents Windows from stretching a blurred window.
         #ctypes.windll.user32.SetProcessDPIAware()
-        pygame.init()        
+        pygame.init()  
+
+        #for i in range(pygame.display.get_num_displays()):
+        #    print(f"Display {i}: {_get_display_bounds(i)}")
+
+        disp_x, disp_y, disp_w, disp_h = _get_display_bounds(display_index)
+
+        win_pos = (disp_x, disp_y) if fullscreen else (disp_x + 100, disp_y + 100)
+        win_size = (disp_w, disp_h) if fullscreen else (width, height)
+
         # Raw SDL2Window creates an X11 Window WITHOUT attaching a 2D SDL_WindowSurface (prevents BadAccess)
-        self.sdl_window = SDL2Window(title=title, size=(width, height))
+        self.sdl_window = SDL2Window(title=title, size=win_size, position=win_pos)
         if fullscreen:
             # Desktop fullscreen (borderless native resolution, avoids display mode flicker)
             self.sdl_window.set_fullscreen(True)
